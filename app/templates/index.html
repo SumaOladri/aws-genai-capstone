@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Recipe AI</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 46rem;
+      margin: 0 auto;
+      padding: 3rem 1.5rem;
+      line-height: 1.6;
+    }
+    h1 { font-size: 2.5rem; margin-bottom: 0.25rem; }
+    h1 span { color: #2563eb; }
+    .sub { color: #6b7280; margin-top: 0; }
+    form { display: flex; gap: 0.5rem; margin: 2rem 0; }
+    input {
+      flex: 1;
+      padding: 0.75rem;
+      font-size: 1rem;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+    }
+    button {
+      padding: 0.75rem 1.5rem;
+      font-size: 1rem;
+      background: #2563eb;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button:hover { background: #1d4ed8; }
+    button:disabled { background: #9ca3af; cursor: wait; }
+    .result {
+      background: #f8f9fa;
+      border: 1px solid #e9ecef;
+      border-radius: 6px;
+      padding: 1.25rem;
+      white-space: pre-wrap;
+      color: #111;
+    }
+    .error {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      color: #991b1b;
+      border-radius: 6px;
+      padding: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Meet Your Personal <span>Recipe AI</span></h1>
+  <p class="sub">Enter a few ingredients, separated by commas.</p>
+
+  <form method="post" action="/generate" onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = 'Generating…';">
+    <input
+      type="text"
+      name="ingredients"
+      placeholder="chicken, rice, onion"
+      value="{{ submitted or '' }}"
+      autofocus
+    >
+    <button type="submit">Generate</button>
+  </form>
+
+  {% if error %}
+    <div class="error">{{ error }}</div>
+  {% endif %}
+
+  {% if result %}
+    <div class="result">{{ result }}</div>
+  {% endif %}
+</body>
+</html>
