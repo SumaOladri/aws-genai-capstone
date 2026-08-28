@@ -22,3 +22,26 @@ resource "aws_iam_role_policy_attachment" "lambda_logs" {
   role       = aws_iam_role.lambda.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
+
+# Allows the function to read its own configuration secrets.
+data "aws_iam_policy_document" "lambda_ssm" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "ssm:GetParameter",
+      "ssm:GetParameters",
+    ]
+    resources = [aws_ssm_parameter.cognito_client_secret.arn]
+  }
+}
+
+resource "aws_iam_policy" "lambda_ssm" {
+  name        = "${local.name_prefix}-lambda-ssm"
+  description = "Read Cognito client secret from Parameter Store"
+  policy      = data.aws_iam_policy_document.lambda_ssm.json
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_ssm" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = aws_iam_policy.lambda_ssm.arn
+}

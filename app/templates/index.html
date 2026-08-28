@@ -54,6 +54,15 @@
 </head>
 <body>
   <h1>Meet Your Personal <span>Recipe AI</span></h1>
+    {% if user %}
+    <p class="sub">Signed in as {{ user.email }} · <a href="/logout">Sign out</a></p>
+  {% else %}
+    <p class="sub"><a href="/login">Sign in</a> to generate recipes.</p>
+  {% endif %}
+
+  {% if auth_error %}
+    <div class="error">Sign-in failed. Please try again.</div>
+  {% endif %}
   <p class="sub">Enter a few ingredients, separated by commas.</p>
 
   <form method="post" action="/generate" onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = 'Generating…';">
