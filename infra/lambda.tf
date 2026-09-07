@@ -24,21 +24,22 @@ resource "aws_lambda_function" "api" {
   timeout     = 60
   memory_size = 512
 
-    environment {
+  environment {
     variables = {
-      USE_MOCK              = "true"
-      MODEL_ID              = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-      COGNITO_DOMAIN        = "https://${aws_cognito_user_pool_domain.main.domain}.auth.${var.region}.amazoncognito.com"
-      COGNITO_CLIENT_ID     = aws_cognito_user_pool_client.web.id
-      COGNITO_USER_POOL_ID  = aws_cognito_user_pool.main.id
-      COGNITO_SECRET_PARAM  = aws_ssm_parameter.cognito_client_secret.name
-      APP_BASE_URL          = local.base_url
-      AWS_REGION_NAME       = var.region
+      USE_MOCK             = tostring(var.use_mock)
+      MODEL_ID             = var.model_id
+      COGNITO_DOMAIN       = "https://${aws_cognito_user_pool_domain.main.domain}.auth.${var.region}.amazoncognito.com"
+      COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.web.id
+      COGNITO_USER_POOL_ID = aws_cognito_user_pool.main.id
+      COGNITO_SECRET_PARAM = aws_ssm_parameter.cognito_client_secret.name
+      APP_BASE_URL         = local.base_url
+      AWS_REGION_NAME      = var.region
     }
   }
 
   depends_on = [
     aws_iam_role_policy_attachment.lambda_logs,
+    aws_iam_role_policy_attachment.lambda_bedrock,
     aws_cloudwatch_log_group.lambda,
   ]
 }

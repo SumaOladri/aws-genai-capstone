@@ -45,3 +45,32 @@ resource "aws_iam_role_policy_attachment" "lambda_ssm" {
   role       = aws_iam_role.lambda.name
   policy_arn = aws_iam_policy.lambda_ssm.arn
 }
+
+# Allows the function to invoke the model. Attached whether or not use_mock is
+# set, so switching the flag is a one-variable change rather than an IAM edit.
+data "aws_iam_policy_document" "lambda_bedrock" {
+  statement {
+    effect  = "Allow"
+    actions = ["bedrock:InvokeModel"]
+
+    resources = [
+      # The inference profile, which lives in this account and region.
+      "arn:aws:bedrock:${var.region}:${data.aws_caller_identity.current.account_id}:inference-profile/${var.model_id}",
+      # The foundation model behind it. A cross-region profile may route the
+      # call to any US region, and the region segment is empty because
+      # foundation models are not account-scoped.
+      "arn:aws:bedrock:*::foundation-model/${local.foundation_model_id}",
+    ]
+  }
+}
+
+resource "aws_iam_policy" "lambda_bedrock" {
+  name        = "${local.name_prefix}-lambda-bedrock"
+  description = "Invoke ${var.model_id} for recipe generation"
+  policy      = data.aws_iam_policy_document.lambda_bedrock.json
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_bedrock" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = aws_iam_policy.lambda_bedrock.arn
+}

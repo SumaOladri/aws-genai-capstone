@@ -18,10 +18,10 @@ A serverless web application on AWS. An authenticated user submits a list of ing
 - [Checking logs and URLs](#checking-logs-and-urls)
 - [Environment variables](#environment-variables)
 - [IAM permissions](#iam-permissions)
-- [Current status: Bedrock is mocked](#current-status-bedrock-is-mocked)
+- [Current status: Bedrock is mocked by default](#current-status-bedrock-is-mocked-by-default)
 - [Enabling the real model](#enabling-the-real-model)
 - [Adding a new environment](#adding-a-new-environment)
-- [Teardown](#teardown)
+- [Teardown and rebuild](#teardown-and-rebuild)
 - [Known issues and gotchas](#known-issues-and-gotchas)
 
 ---
@@ -264,7 +264,11 @@ Configures the AWS provider. Unlike the backend block, this *can* use variables 
 
 ### `variables.tf`
 
-Declares four inputs with **no defaults**. A variable without a default is required, so `terraform apply` fails unless a `-var-file` is passed. This makes it impossible to accidentally deploy to the wrong environment by omitting a flag.
+Declares the stack's inputs, in two groups.
+
+The four placement variables — `project`, `environment`, `region`, `aws_profile` — have **no defaults**. A variable without a default is required, so `terraform apply` fails unless a `-var-file` is passed. This makes it impossible to accidentally deploy to the wrong environment by omitting a flag.
+
+The two model variables — `use_mock` and `model_id` — do have defaults, because there is a sane answer for both and neither one risks deploying to the wrong place. `use_mock` defaults to `true` so a fresh clone comes up working without Bedrock access.
 
 ### `locals.tf`
 
@@ -586,8 +590,8 @@ Set on the Lambda by Terraform. Nothing here is secret — `COGNITO_SECRET_PARAM
 
 | Variable | Example | Purpose |
 |---|---|---|
-| `USE_MOCK` | `true` | Return a canned recipe instead of calling Bedrock |
-| `MODEL_ID` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock inference profile ID |
+| `USE_MOCK` | `true` | Return a canned recipe instead of calling Bedrock. Set by the `use_mock` Terraform variable |
+| `MODEL_ID` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock inference profile ID. Set by the `model_id` Terraform variable |
 | `COGNITO_DOMAIN` | `https://genai-capstone-dev-….auth.us-east-1.amazoncognito.com` | Hosted UI base URL |
 | `COGNITO_CLIENT_ID` | `<client-id>` | App client ID; also the expected JWT audience |
 | `COGNITO_USER_POOL_ID` | `us-east-1_…` | Used to build the JWT issuer URL |
@@ -601,7 +605,7 @@ Set on the Lambda by Terraform. Nothing here is secret — `COGNITO_SECRET_PARAM
 
 ### Execution role — what the function can do
 
-`genai-capstone-dev-lambda-role`, with two attached policies:
+`genai-capstone-dev-lambda-role`, with three attached policies:
 
 **`AWSLambdaBasicExecutionRole`** (AWS-managed)
 ```json
@@ -625,6 +629,20 @@ Scoped to a single parameter ARN. No `PutParameter`, no `DeleteParameter`, no wi
 
 No `kms:Decrypt` is needed because the parameter uses the AWS-managed `aws/ssm` key, whose own key policy permits decryption by principals already authorised to call SSM. A customer-managed key **would** require an explicit `kms:Decrypt` grant.
 
+**`genai-capstone-dev-lambda-bedrock`** (defined in this repo)
+```json
+{
+  "Effect": "Allow",
+  "Action": ["bedrock:InvokeModel"],
+  "Resource": [
+    "arn:aws:bedrock:us-east-1:<account>:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+  ]
+}
+```
+
+Attached unconditionally, regardless of `use_mock`, so enabling the real model is a variable change rather than an IAM change. Both ARNs are required — see [Enabling the real model](#enabling-the-real-model) for why. The foundation-model ARN has a `*` region because a `us.` inference profile may route to any US region, and an empty account segment because foundation models are not account-scoped.
+
 ### Resource policy — who can invoke the function
 
 ```json
@@ -643,11 +661,13 @@ Opposite direction from the execution role, and scoped to this specific API rath
 
 ---
 
-## Current status: Bedrock is mocked
+## Current status: Bedrock is mocked by default
 
-`USE_MOCK=true`. `generate_recipe()` returns a formatted template built from the submitted ingredients, clearly marked as a mock in the output.
+`use_mock = true` in `env/dev.tfvars`, so `generate_recipe()` returns a formatted template built from the submitted ingredients, clearly marked as a mock in the output.
 
-**Why:** the AWS account is still under new-account verification, which blocks Bedrock `InvokeModel` (and CloudShell) entirely. Verification takes up to two days for new accounts.
+**Why:** the AWS account was under new-account verification, which blocks Bedrock `InvokeModel` (and CloudShell) entirely. Verification takes up to two days for new accounts.
+
+The IAM grant is already in the stack — turning the real model on is a one-variable change, not a code change. See [Enabling the real model](#enabling-the-real-model).
 
 Diagnosis notes, in case this recurs:
 
@@ -685,61 +705,41 @@ aws bedrock-runtime invoke-model \
   /dev/stdout
 ```
 
-### 2. Add the IAM policy
+### 2. Flip the flag
 
-Append to `infra/iam.tf`:
+The IAM policy is already applied — `infra/iam.tf` grants `bedrock:InvokeModel` on both the inference profile and the foundation model behind it, whether or not `use_mock` is set, so switching modes never needs an IAM edit.
 
-```hcl
-locals {
-  bedrock_profile_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-  bedrock_model_id   = "anthropic.claude-haiku-4-5-20251001-v1:0"
-}
+> **Both ARN types are required, and that is why the policy looks the way it does.** A `us.`-prefixed profile is a *cross-region inference profile*: it routes requests to whichever of several regions has capacity. Granting only the profile ARN produces an `AccessDeniedException` naming a region you never explicitly configured — the single most common Bedrock IAM mistake. `local.foundation_model_id` strips the `us.` prefix to derive the model ID, and the model ARN uses a `*` region because a foundation model is not account-scoped.
 
-data "aws_iam_policy_document" "lambda_bedrock" {
-  statement {
-    effect  = "Allow"
-    actions = ["bedrock:InvokeModel"]
-    resources = [
-      # The inference profile itself
-      "arn:aws:bedrock:${var.region}:${data.aws_caller_identity.current.account_id}:inference-profile/${local.bedrock_profile_id}",
-      # Every region the "us." profile may route to
-      "arn:aws:bedrock:us-east-1::foundation-model/${local.bedrock_model_id}",
-      "arn:aws:bedrock:us-east-2::foundation-model/${local.bedrock_model_id}",
-      "arn:aws:bedrock:us-west-2::foundation-model/${local.bedrock_model_id}",
-    ]
-  }
-}
-
-resource "aws_iam_policy" "lambda_bedrock" {
-  name        = "${local.name_prefix}-lambda-bedrock"
-  description = "Invoke the Bedrock inference profile"
-  policy      = data.aws_iam_policy_document.lambda_bedrock.json
-}
-
-resource "aws_iam_role_policy_attachment" "lambda_bedrock" {
-  role       = aws_iam_role.lambda.name
-  policy_arn = aws_iam_policy.lambda_bedrock.arn
-}
-```
-
-> **Both ARN types are required.** A `us.`-prefixed profile is a *cross-region inference profile*: it routes requests to whichever of several regions has capacity. Granting only the profile ARN produces an `AccessDeniedException` naming a region you never explicitly configured. This is the single most common Bedrock IAM mistake.
-
-### 3. Flip the flag
-
-In `infra/lambda.tf`:
+In `infra/env/dev.tfvars`:
 
 ```hcl
-USE_MOCK = "false"
+use_mock = true   # → false
 ```
 
-### 4. Deploy
+To try a different model, set `model_id` alongside it — the IAM policy follows the variable, so no other file changes:
+
+```hcl
+model_id = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+```
+
+### 3. Deploy
 
 ```bash
 cd infra
 terraform apply -var-file=env/dev.tfvars
 ```
 
-No rebuild needed — only the environment variable changes.
+No rebuild needed — only the environment variable and the IAM policy change.
+
+Confirm the flag actually moved:
+
+```bash
+aws lambda get-function-configuration \
+  --function-name genai-capstone-dev-api \
+  --region us-east-1 \
+  --query 'Environment.Variables.{USE_MOCK:USE_MOCK,MODEL_ID:MODEL_ID}'
+```
 
 ---
 
@@ -777,16 +777,70 @@ Every resource name is derived from `local.name_prefix`, so uat resources are na
 
 ---
 
-## Teardown
+## Teardown and rebuild
+
+The whole point of keeping this in Terraform: the stack can be deleted when it
+is not being used and rebuilt on demand. Idle cost is near zero — Lambda and
+API Gateway bill per request — so this is more about tidiness than money, but
+the cycle is worth knowing.
+
+### Destroy
 
 ```bash
+aws sso login --profile SUMA          # token expires every 8 hours
 cd infra
 terraform destroy -var-file=env/dev.tfvars
 ```
 
-Destroys everything: Lambda, API Gateway, Cognito pool (**and all registered users**), IAM role and policies, SSM parameter, both log groups.
+Takes about two minutes. Destroys everything: Lambda, API Gateway, Cognito pool
+(**and all registered users**), IAM role and policies, SSM parameter, both log
+groups.
 
-**Not destroyed** — created outside Terraform:
+### Rebuild
+
+Four commands from a clean clone:
+
+```bash
+git clone git@github.com:SumaOladri/aws-genai-capstone.git
+cd aws-genai-capstone
+
+aws sso login --profile SUMA
+./build.sh                                            # build/ is gitignored
+cd infra
+terraform init -backend-config=env/dev.backend.hcl    # skip if .terraform/ exists
+terraform apply -var-file=env/dev.tfvars
+```
+
+Then read the new URL off the outputs:
+
+```bash
+terraform output -raw api_url
+```
+
+`./build.sh` is not optional. `build/` is gitignored — it is 32 MB of installed
+dependencies — and `data.archive_file.lambda` zips that directory, so a fresh
+clone has nothing to package and `apply` fails at the archive step.
+
+There is no ordering trap beyond that. Terraform resolves the rest itself: the
+API Gateway stage is created first, its `invoke_url` becomes `local.base_url`,
+that fills the Cognito client's `callback_urls`, and the client ID and secret
+land in the Lambda's environment. One apply, no second pass, no manual console
+step, no imports.
+
+### What does not survive a rebuild
+
+| Changes | Consequence |
+|---|---|
+| API Gateway URL | The whole hostname is new; update any bookmark |
+| Cognito pool ID and client ID | Every registered user account is gone with the old pool |
+| Cognito hosted UI hostname | Includes the account ID, so it is stable — but the pool behind it is not |
+| Client secret | Regenerated and rewritten to SSM automatically |
+
+Nothing needs to be copied by hand: the callback URL is derived from the new API
+Gateway URL on the same apply, which is the reason it is `local.base_url` rather
+than a hardcoded string.
+
+### Not destroyed — created outside Terraform
 
 ```bash
 # The state bucket
@@ -794,7 +848,7 @@ aws s3 rm s3://<your-tf-state-bucket> --recursive
 aws s3api delete-bucket --bucket <your-tf-state-bucket> --region us-east-1
 ```
 
-Verify nothing survived:
+### Verify nothing survived
 
 ```bash
 aws lambda list-functions --region us-east-1 \
