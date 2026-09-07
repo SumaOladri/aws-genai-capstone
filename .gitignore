@@ -8,3 +8,6 @@ __pycache__/
 build/
 *.zip
 .artifacts/
+
+# Local backend config holding the real state bucket name
+infra/env/*.local.hcl

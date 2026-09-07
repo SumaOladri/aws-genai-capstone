@@ -203,8 +203,13 @@ uv sync
 
 ```bash
 cd infra
-terraform init -backend-config=env/dev.backend.hcl
+terraform init -backend-config=env/dev.backend.hcl \
+  -backend-config="bucket=<your-tf-state-bucket>"
 ```
+
+The bucket name is deliberately not committed — this repository is public, and
+`env/dev.backend.hcl` carries everything except that one line. Keep it in
+`env/dev.backend.local.hcl` (gitignored) if you would rather not retype it.
 
 ### 5. Build and deploy
 
@@ -807,7 +812,8 @@ cd aws-genai-capstone
 aws sso login --profile SUMA
 ./build.sh                                            # build/ is gitignored
 cd infra
-terraform init -backend-config=env/dev.backend.hcl    # skip if .terraform/ exists
+terraform init -backend-config=env/dev.backend.hcl \
+  -backend-config="bucket=<your-tf-state-bucket>"     # skip if .terraform/ exists
 terraform apply -var-file=env/dev.tfvars
 ```
 
