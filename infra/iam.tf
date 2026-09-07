@@ -46,9 +46,15 @@ resource "aws_iam_role_policy_attachment" "lambda_ssm" {
   policy_arn = aws_iam_policy.lambda_ssm.arn
 }
 
-# Allows the function to invoke the model. Attached whether or not use_mock is
-# set, so switching the flag is a one-variable change rather than an IAM edit.
+# Allows the function to invoke the model.
+#
+# Created only when the model is actually in use. In mock mode the function
+# never calls Bedrock, so granting it would be permission the code cannot
+# exercise — and it keeps a rebuild in mock mode down to exactly the set of
+# resources that has already been applied successfully.
 data "aws_iam_policy_document" "lambda_bedrock" {
+  count = var.use_mock ? 0 : 1
+
   statement {
     effect  = "Allow"
     actions = ["bedrock:InvokeModel"]
@@ -65,12 +71,16 @@ data "aws_iam_policy_document" "lambda_bedrock" {
 }
 
 resource "aws_iam_policy" "lambda_bedrock" {
+  count = var.use_mock ? 0 : 1
+
   name        = "${local.name_prefix}-lambda-bedrock"
   description = "Invoke ${var.model_id} for recipe generation"
-  policy      = data.aws_iam_policy_document.lambda_bedrock.json
+  policy      = data.aws_iam_policy_document.lambda_bedrock[0].json
 }
 
 resource "aws_iam_role_policy_attachment" "lambda_bedrock" {
+  count = var.use_mock ? 0 : 1
+
   role       = aws_iam_role.lambda.name
-  policy_arn = aws_iam_policy.lambda_bedrock.arn
+  policy_arn = aws_iam_policy.lambda_bedrock[0].arn
 }

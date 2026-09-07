@@ -610,7 +610,7 @@ Set on the Lambda by Terraform. Nothing here is secret — `COGNITO_SECRET_PARAM
 
 ### Execution role — what the function can do
 
-`genai-capstone-dev-lambda-role`, with three attached policies:
+`genai-capstone-dev-lambda-role`, with two attached policies in mock mode and a third once the real model is enabled:
 
 **`AWSLambdaBasicExecutionRole`** (AWS-managed)
 ```json
@@ -646,7 +646,9 @@ No `kms:Decrypt` is needed because the parameter uses the AWS-managed `aws/ssm` 
 }
 ```
 
-Attached unconditionally, regardless of `use_mock`, so enabling the real model is a variable change rather than an IAM change. Both ARNs are required — see [Enabling the real model](#enabling-the-real-model) for why. The foundation-model ARN has a `*` region because a `us.` inference profile may route to any US region, and an empty account segment because foundation models are not account-scoped.
+**Created only when `use_mock = false`** (`count = var.use_mock ? 0 : 1`). In mock mode the function never calls Bedrock, so the grant would be permission the code cannot exercise. It also means a rebuild in mock mode creates exactly the resource set that has already been applied successfully — nothing new in the path.
+
+Both ARNs are required — see [Enabling the real model](#enabling-the-real-model) for why. The foundation-model ARN has a `*` region because a `us.` inference profile may route to any US region, and an empty account segment because foundation models are not account-scoped.
 
 ### Resource policy — who can invoke the function
 
@@ -712,7 +714,7 @@ aws bedrock-runtime invoke-model \
 
 ### 2. Flip the flag
 
-The IAM policy is already applied — `infra/iam.tf` grants `bedrock:InvokeModel` on both the inference profile and the foundation model behind it, whether or not `use_mock` is set, so switching modes never needs an IAM edit.
+The IAM policy is already written — `infra/iam.tf` grants `bedrock:InvokeModel` on both the inference profile and the foundation model behind it. It is gated on `count = var.use_mock ? 0 : 1`, so flipping the variable creates the policy and attaches it in the same apply. No IAM edit, and no unused grant sitting on the role while the model is mocked.
 
 > **Both ARN types are required, and that is why the policy looks the way it does.** A `us.`-prefixed profile is a *cross-region inference profile*: it routes requests to whichever of several regions has capacity. Granting only the profile ARN produces an `AccessDeniedException` naming a region you never explicitly configured — the single most common Bedrock IAM mistake. `local.foundation_model_id` strips the `us.` prefix to derive the model ID, and the model ARN uses a `*` region because a foundation model is not account-scoped.
 
@@ -803,35 +805,67 @@ groups.
 
 ### Rebuild
 
-Four commands from a clean clone:
+Everything below is one pass. There is no manual console step, no import, and
+no second apply.
+
+```bash
+# 1. Credentials (the SSO token expires every 8 hours)
+aws sso login --profile SUMA
+
+# 2. Build the deployment package — NOT optional, see below
+cd <repo-root>
+./build.sh
+
+# 3. Initialise Terraform against the state bucket
+cd infra
+terraform init -backend-config=env/dev.backend.hcl \
+  -backend-config="bucket=<your-tf-state-bucket>"
+
+# 4. Recreate everything
+terraform apply -var-file=env/dev.tfvars
+```
+
+From a completely clean machine, prepend the clone and toolchain:
 
 ```bash
 git clone git@github.com:SumaOladri/aws-genai-capstone.git
 cd aws-genai-capstone
-
-aws sso login --profile SUMA
-./build.sh                                            # build/ is gitignored
-cd infra
-terraform init -backend-config=env/dev.backend.hcl \
-  -backend-config="bucket=<your-tf-state-bucket>"     # skip if .terraform/ exists
-terraform apply -var-file=env/dev.tfvars
+uv sync
 ```
 
-Then read the new URL off the outputs:
+**`./build.sh` is not optional.** `build/` is gitignored — it is 32 MB of
+installed dependencies — and `data.archive_file.lambda` zips that directory. A
+fresh clone has nothing to package, so `apply` fails at the archive step with a
+missing-directory error rather than anything that names the real cause.
+
+### Verify the rebuild actually worked
+
+Do not assume a green apply means a working application. Four checks, in the
+order that isolates a failure fastest:
 
 ```bash
-terraform output -raw api_url
+# 1. Terraform believes everything exists and matches
+terraform plan -var-file=env/dev.tfvars     # expect: "No changes"
+
+# 2. The new URL responds
+curl -s -o /dev/null -w '%{http_code}\n' "$(terraform output -raw api_url)"
+# expect: 200
+
+# 3. The function has the environment it needs
+aws lambda get-function-configuration \
+  --function-name genai-capstone-dev-api \
+  --region us-east-1 \
+  --query 'Environment.Variables.{MOCK:USE_MOCK,POOL:COGNITO_USER_POOL_ID,BASE:APP_BASE_URL}'
+# expect: APP_BASE_URL matches the api_url above — this is the one that catches
+# a Cognito callback mismatch before you hit it in the browser
+
+# 4. Login works end to end
+terraform output -raw cognito_domain
+# open the app URL, sign up, confirm the emailed code, generate a recipe
 ```
 
-`./build.sh` is not optional. `build/` is gitignored — it is 32 MB of installed
-dependencies — and `data.archive_file.lambda` zips that directory, so a fresh
-clone has nothing to package and `apply` fails at the archive step.
-
-There is no ordering trap beyond that. Terraform resolves the rest itself: the
-API Gateway stage is created first, its `invoke_url` becomes `local.base_url`,
-that fills the Cognito client's `callback_urls`, and the client ID and secret
-land in the Lambda's environment. One apply, no second pass, no manual console
-step, no imports.
+Check 4 matters because the Cognito pool is new: **every previously registered
+account is gone**, so you are signing up from scratch, not signing in.
 
 ### What does not survive a rebuild
 
@@ -839,12 +873,24 @@ step, no imports.
 |---|---|
 | API Gateway URL | The whole hostname is new; update any bookmark |
 | Cognito pool ID and client ID | Every registered user account is gone with the old pool |
-| Cognito hosted UI hostname | Includes the account ID, so it is stable — but the pool behind it is not |
 | Client secret | Regenerated and rewritten to SSM automatically |
+| Cognito hosted UI hostname | Derived from the account ID, so the *hostname* is stable — but the pool behind it is not |
 
-Nothing needs to be copied by hand: the callback URL is derived from the new API
-Gateway URL on the same apply, which is the reason it is `local.base_url` rather
-than a hardcoded string.
+Nothing needs to be copied by hand. The callback URL is derived from the new
+API Gateway URL on the same apply — which is the reason `cognito.tf` uses
+`local.base_url` rather than a hardcoded string, and the reason this is a
+single-pass rebuild rather than an apply-twice dance.
+
+### Why a rebuild is low risk
+
+Ordering resolves itself. The API Gateway stage is created first, its
+`invoke_url` becomes `local.base_url`, that fills the Cognito client's
+`callback_urls`, the client ID and secret land in the Lambda's environment, and
+the integration points back at the function. No cycle, no bootstrapping problem.
+
+In mock mode (`use_mock = true`, the default) the Bedrock IAM policy is not
+created at all, so a rebuild produces exactly the resource set that has already
+been applied successfully in this account — nothing untested in the path.
 
 ### Not destroyed — created outside Terraform
 
